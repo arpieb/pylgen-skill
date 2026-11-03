@@ -28,14 +28,14 @@ Project-scoped (checked into the repo you're building with PyLGEN):
 
 ```bash
 mkdir -p .claude/skills
-cp -r pylgen-docs .claude/skills/pylgen
+cp -r pylgen-skill .claude/skills/pylgen
 ```
 
 User-scoped (available in every project):
 
 ```bash
 mkdir -p ~/.claude/skills
-cp -r pylgen-docs ~/.claude/skills/pylgen
+cp -r pylgen-skill ~/.claude/skills/pylgen
 ```
 
 Claude Code picks it up from the `SKILL.md` frontmatter; invoke explicitly with `/pylgen` or just ask about PyLGEN.
@@ -50,5 +50,5 @@ If you'd rather not use skills, drop `SKILL.md` content into your project's `CLA
 
 ```bash
 git clone --depth 1 https://github.com/yonyuk/pylgen.git
-python build_bundle.py pylgen ./pylgen-docs   # then re-check SKILL.md against the changelog
+python build_bundle.py pylgen ./pylgen-skill   # then re-check SKILL.md against the changelog
 ```
