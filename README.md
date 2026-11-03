@@ -1,4 +1,4 @@
-# pylgen-docs — LLM-friendly PyLGEN reference bundle
+# pylgen-skill — LLM-friendly PyLGEN reference bundle
 
 Generated 2026-11-03 from `pylgen-core` 0.7.3 (https://github.com/yonyuk/pylgen, BSD-3-Clause).
 Docs text is the upstream mkdocs source with tabs/admonitions flattened to plain markdown.
