@@ -23,6 +23,7 @@ This file is the cheat sheet. Full material lives beside it:
 | Cython-compiled language, `cdef` reducers | `reference/tutorials/veclang.md`, `reference/04-api-reference-cython.md` |
 | Building a lexer/LR parser from the primitives | `reference/tutorials/foundations.md` |
 | Theory (automata, FIRST/FOLLOW, LR items) | `reference/05-formal-foundations.md` |
+| Tested drop-in code (not upstream; verified against 0.7.3) | `recipes/post_order.py` (iterative `PostOrderStrategy`), `recipes/yaml_lexer.py` (`IdentedLexer` subclass for YAML-like config, with sanitizer + indentation errors) |
 
 Grep these files rather than reading them whole; the tutorials are 25–170 KB each.
 
@@ -66,7 +67,7 @@ class Tok(TokenType):
     NUMBER = "NUMBER"; PLUS = "PLUS"; MINUS = "MINUS"; STAR = "STAR"; SLASH = "SLASH"
     LPAREN = "LPAREN"; RPAREN = "RPAREN"; EOF = "EOF"
 
-# 2. Symbols — Symbol(name, is_terminal=False, is_epsilon=False)
+# 2. Symbols — Symbol(symbol: str, is_terminal=False, is_epsilon=False); text is sym.symbol / str(sym)
 E, T, F = Symbol("E"), Symbol("T"), Symbol("F")                   # non-terminals
 number, plus, minus = Symbol("number", True), Symbol("+", True), Symbol("-", True)
 star, slash, lp, rp = Symbol("*", True), Symbol("/", True), Symbol("(", True), Symbol(")", True)
@@ -134,13 +135,24 @@ if lexer.errors or parser.syntax_errors:
 - `Lexer(get_symbol_function, ignore_pattern: str)`; `IdentedLexer` same ctor plus `set_ident(Tok.X)`, `set_indent_symbol(sym)`, `set_dedent_symbol(sym)`, `set_text_sanitize_function(fn)`.
 - Token patterns: `lexer[priority, Tok.X] = regex` or `lexer.add_token_regex(priority, Tok.X, regex)`. Longest match wins; on equal length, lower priority number wins → put keywords before identifiers.
 - The regex engine is PyLGEN's own (`pylgen.regex`), not `re`. Supported: literals, `.`, classes `[abc] [^abc] [a-z]`, `\d \D \s \S \w \W`, quantifiers `* + ? {min,max}`, alternation `|`, groups `( )`, escapes `\( \) \[ \] \{ \} \- \* \+ \? \^ \| \. \,`. Alphabet = `string.printable` + Latin accented vowels/ñ/ü + `¿ ¡ « »` (since 0.7.2). **Not** supported: lookaround, backreferences, non-greedy quantifiers, named groups, `\b`. Full list: `reference/02-user-guide.md` §"Supported Syntax".
+- **No literal backslash.** `\\` is not an escape: `[^\\]` raises a bare `ValueError` from `regex.engine._parse`, and `"([^"\\]|\\.)*"` **segfaults the interpreter**. Backslash-escaped strings can't be lexed by regex; use no-escape `"[^"\n]*"` or doubled quotes `'([^'\n]|'')*'`.
+- **`ignore_pattern` is checked against each token's matched text, not the raw input.** Text that no token regex matches is consumed one char at a time, so only *single-char* ignores (e.g. `\s`) work on their own. A multi-char ignore (comments, `#[^\n]*`) needs a token registered with the same regex, or it comes out as one `INVALID_TOKEN` per char.
 - `lexer.tokens` is a generator; it initializes the DFA on first use and appends the EOF token if `set_eof_token` was called. `load_text()` resets position counters.
-- `lexer.errors` → `Set[LexicalError]`; `clear_errors()`. Unmatched text becomes `INVALID_TOKEN` + a `LexicalError`; tokenization continues.
+- `lexer.errors` → `Set[LexicalError]`; `clear_errors()`. Unmatched text becomes `INVALID_TOKEN` + a `LexicalError`; tokenization continues. **`load_text()` does not clear errors**: call `clear_errors()` before reusing a lexer, or stale errors leak into the next input.
 - Extra validation beyond regex: subclass `analysis.lexical.LexicalRule(msg)`, implement `_check(self, text) -> bool`, register with `lexer.add_rule(Tok.X, rule)`.
 - Mapping function annotations are enforced with `inspect`: first param annotated with your `TokenType` subclass, second `str`, return `Symbol`. Missing annotations → `ValueError`/init failure.
+- `Lexer`/`IdentedLexer` (and `TraversalStrategy` etc.) are cdef classes but can be subclassed in Python, with new attributes and overrides of `load_text`, `clear_errors`, and the `errors` property. This is a clean way to bundle a preconfigured lexer (see `recipes/yaml_lexer.py`).
+
+**IdentedLexer mechanics** (from `lexer/lexer.pyx`; the upstream docs don't describe these)
+- Indent depth = the number of *consecutive ident-type tokens starting at column 1*. So the ident token regex must match **one indent unit** (`"  "` or `"    "`), not a run of whitespace.
+- Whitespace-only tokens at column > 1 are silently dropped (their `INVALID_TOKEN` errors are removed too). You still need a token for in-line spaces. Make it a **single char** (`[ \t]`): a `" +"` token would beat the indent unit on longest match and break indentation.
+- Leading whitespace that isn't an ident token (a tab, or an odd leftover space at column 1) is yielded as a stray token with no error. Validate indentation yourself, e.g. in the sanitizer.
+- INDENT/DEDENT are emitted just before the first token of a line whose depth changed (Python-style; INDENT token text is `'IDENT'`). Pending DEDENTs flush before EOF. NEWLINE must be its own token (`"\n"`).
+- The sanitize function replaces the text on `load_text`. Keep the line count unchanged so positions stay correct. Standard trick: turn blank/comment-only lines into a marker like `#blank#` and use `"#blank#\n?"` as **both** the ignore pattern and a registered token (see the ignore-pattern rule above). Strip trailing comments there too, respecting quotes.
 
 **Grammar**
-- `Symbol` equality/hash = (name, is_terminal, is_epsilon). Reuse the same `Symbol` objects between lexer mapping and grammar.
+- `Symbol` attributes are `.symbol` (the text), `.is_terminal`, `.is_epsilon` — there is **no `.name`** (`AttributeError`). Get the text with `sym.symbol` or `str(sym)`, e.g. to dispatch on an operator in a `BinaryOpAST`.
+- `Symbol` equality/hash = (symbol, is_terminal, is_epsilon). Reuse the same `Symbol` objects between lexer mapping and grammar.
 - Epsilon: `eps = Symbol("ε", is_terminal=True, is_epsilon=True)`; only one epsilon symbol per grammar (`ValueError` otherwise). Use `G[A] += (eps,), reducer`.
 - `Grammar.first(seq)`, `Grammar.follow(sym)` compute lazily; `Grammar.AugmentGrammar(g)` / `Reverse(g)` are static. `to_dict()` for debugging.
 - Every production in an `AttributedGrammar` needs a reducer — there is no default. A reduction without one fails.
@@ -151,7 +163,7 @@ if lexer.errors or parser.syntax_errors:
 - Conflicts raise at build time: `LALRShiftReduceConflictException`, `LALRReduceReduceConflictException` (and SLR/LR1 variants), carrying `.state`, `.symbol`, `.production` / `.old`, `.new_`. To inspect visually: `pylgen.visual.lr_inspect_grammar(G, ParserType.LALR1, ...)`.
 - `parser.parse(tokens)` never raises on syntax errors; it does panic-mode recovery and accumulates `parser.errors`. Check `parser.syntax_errors` (bool) before semantic analysis — `parser.errors` may also contain semantic errors attached via `ErrorAST` nodes.
 - Parse tree (distinct from AST): `parser.set_draw_parse_tree_flag(True)` before parsing, then `parser.parse_tree` (`ParseTreeNode` with `.symbol`, `.start_position`, `.end_position`, `.children` — note `.children` property, renamed from `childrens` in 0.7.3).
-- `Parser.reset()` is documented as not implemented in the base; rebuild or re-`parse` instead of relying on it.
+- **A parser is single-use.** A second `parser.parse(...)` on the same instance raises `ValueError: EOF token already readed`, and `Parser.reset()` is not implemented. Call `ParserBuilder.build_parser_from_attributed(G, ...)` again for each input (the grammar object can be reused).
 
 **AST / positions / errors**
 - `AST(symbol, start_line, start_column, end_line, end_column)`; properties `start_position`, `end_position` (tuples), `is_error`, `symbol`; abstract `children()`. `str(ast)` = symbol name.
@@ -160,7 +172,8 @@ if lexer.errors or parser.syntax_errors:
 
 **Analysis (visitor framework)** — see `examples/arithmetic_interpreter/visitors.py`, `semantic.py`, `context.py`
 - Subclass `Context`; the base raises `NotImplementedError` for `push_new_scope`, `pop_scope`, `add_runtime_error(ast, err)`, `clear_runtime_errors`, `get_runtime_errors` — override the ones you call. `add_semantic_error`, `clear_semantic_errors`, `clear_errors`, `reset`, `push_trace/pop_trace`, `.errors`, `.stack_trace` work out of the box.
-- `ASTVisitor(context_type)`: implement `visit(self, ast: YourNode, context: YourContext)`. `ASTChildrenSelector(context_type)`: implement `select_children(self, ast, context) -> List[AST]` (usually `return ast.children()`). `TraversalStrategy(context_type)`: implement `init(root)`, `has_next()`, `current(context) -> AST`, `reset()`; use `self._get_selector(ast)` inside. **There is no built-in pre/post-order strategy** — write one (the arithmetic example has a ~25-line `PostOrderStrategy`).
+- `ASTVisitor(context_type)`: implement `visit(self, ast: YourNode, context: YourContext)`. `ASTChildrenSelector(context_type)`: implement `select_children(self, ast, context) -> List[AST]` (usually `return ast.children()`). `TraversalStrategy(context_type)`: implement `init(root)`, `has_next()`, `current(context) -> AST`, `reset()`; use `self._get_selector(ast)` inside. **There is no built-in pre/post-order strategy**: use `recipes/post_order.py` (iterative, so no recursion limit on deep trees) or the arithmetic example's `PostOrderStrategy`.
+- Writing a `TraversalStrategy`: `current()` must call `self._check_context_type(context)` first (base contract). `init()` should call `super().init(root)`. Only `current()` receives the context, so call selectors lazily there, not in `init()`. `_get_selector` raises a bare `KeyError` when the node type has no selector and no default is set. `ASTWalker.walk()` calls `init(root)` before and `reset()` after every walk, so one strategy can serve several walkers and walks.
 - Wiring: `strategy.set_default_selector(sel)`; `walker = ASTWalker(context, strategy)`; `walker.add_visitor(NodeType, visitor)`; `walker.set_default_visitor(v)`; `walker.walk(ast)`. Dispatch is by exact `type(ast)` with fallback to the default visitor.
 - Context-type annotations on `visit`/`select_children` are checked with `inspect` against `context_type` → `TypeError` if they don't match. Annotate them.
 - Common pattern: evaluators store per-node values in the context (`context.add_ast_value(ast, v)` / `get_ast_value`) during a post-order walk, so parents read children's values.
@@ -186,3 +199,7 @@ if lexer.errors or parser.syntax_errors:
 5. Reducer `KeyError`/failure → a production has no reducer, or wrong index into `ASTListView`.
 6. `TypeError` from `add_visitor`/`add_selector` → `context` param annotation doesn't match the `context_type` passed to the constructor.
 7. `NotImplementedError` from `Context` → override the scope/runtime-error methods you use.
+8. `ValueError: EOF token already readed` → the parser was reused; rebuild it for each parse.
+9. Segfault (exit 139) or bare `ValueError` when registering a token → a regex contains a backslash literal (`\\`); see Lexer gotchas.
+10. Comments/markers lexed as one `INVALID_TOKEN` per char → a multi-char ignore pattern with no matching registered token.
+11. Errors from a previous input show up again → `lexer.clear_errors()` before `load_text()`.
